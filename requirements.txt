@@ -1,0 +1,9 @@
+numpy>=1.23,<2.0
+pandas>=1.5,<2.2
+openpyxl>=3.1
+matplotlib>=3.6
+scikit-learn>=1.2
+shap>=0.41,<0.45
+torch>=1.13
+gpytorch==1.10
+botorch==0.8.5
