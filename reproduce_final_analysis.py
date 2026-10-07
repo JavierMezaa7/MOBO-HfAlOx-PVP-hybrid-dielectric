@@ -5,7 +5,7 @@ Reproduce the final analysis and figures for the HfOx-AlOx-PVP MOBO study.
 Input
 -----
 One Excel file with the exact columns used in the public dataset:
-    Muestras
+    Sample
     AlOx
     HfOx
     PVP
