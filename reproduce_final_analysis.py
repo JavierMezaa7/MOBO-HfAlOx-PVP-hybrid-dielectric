@@ -13,8 +13,8 @@ One Excel file with the exact columns used in the public dataset:
     C_std
     -log J
     I_std
-    Clasificacion
-    Factibilidad
+    Class
+    Feasibility
 
 Coding used in the dataset
 --------------------------
@@ -23,7 +23,7 @@ Clasificacion:
     1 = Precipitated
     2 = Suitable
 
-Factibilidad:
+Feasibility:
     0 = Infeasible
     1 = Feasible
 
@@ -102,14 +102,13 @@ MESH_STEP = 0.01
 P_FEAS_THRESHOLD = 0.60
 
 CLASSIFIER_TRAINING_ITER = 500
-CLASSIFIER_LR = 0.01
+CLASSIFIER_LR = 0.02
 
 CLASS_NAMES = {
     0: "Opaque",
     1: "Precipitated",
     2: "Suitable",
 }
-
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -120,34 +119,34 @@ def load_data(excel_file: str | Path):
     df = pd.read_excel(excel_file)
 
     required = [
-        "Muestras", *INPUT_NAMES, *OUTPUT_NAMES, *STD_NAMES,
-        "Clasificacion", "Factibilidad"
+        "Sample", *INPUT_NAMES, *OUTPUT_NAMES, *STD_NAMES,
+        "Class", "Feasibility"
     ]
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
 
-    df = df[required].dropna(subset=["Muestras"]).copy()
-    df["Muestras"] = df["Muestras"].astype(int)
+    df = df[required].dropna(subset=["Sample"]).copy()
+    df["Sample"] = df["Sample"].astype(int)
 
     # Check ternary constraint.
     composition_sum = df[INPUT_NAMES].sum(axis=1)
     if not np.allclose(composition_sum, 1.0, atol=2e-4):
         bad = df.loc[np.abs(composition_sum - 1.0) > 2e-4,
-                     ["Muestras", *INPUT_NAMES]]
+                     ["Sample", *INPUT_NAMES]]
         raise ValueError(
             "Some compositions do not satisfy AlOx + HfOx + PVP = 1:\n"
             + bad.to_string(index=False)
         )
 
     # Training = samples 1-30. Validation = samples 31-33.
-    training = df[df["Muestras"] <= TRAINING_LAST_SAMPLE].copy()
-    validation = df[df["Muestras"] >= VALIDATION_FIRST_SAMPLE].copy()
+    training = df[df["Sample"] <= TRAINING_LAST_SAMPLE].copy()
+    validation = df[df["Sample"] >= VALIDATION_FIRST_SAMPLE].copy()
 
     # GPR uses only experimentally feasible/Suitable formulations.
     regression = training[
-        (training["Factibilidad"] == 1) &
-        (training["Clasificacion"] == 2)
+        (training["Feasibility"] == 1) &
+        (training["Class"] == 2)
     ].copy()
 
     if len(regression) != 23:
@@ -156,8 +155,6 @@ def load_data(excel_file: str | Path):
         )
 
     return df, training, regression, validation
-
-
 # ---------------------------------------------------------------------------
 # Fixed-noise Gaussian-process regression
 # ---------------------------------------------------------------------------
@@ -197,7 +194,6 @@ def fit_single_gp(X, y, y_std):
         "y_std": y_scale,
     }
 
-
 def fit_regression_models(regression_df):
     X = torch.tensor(
         regression_df[INPUT_NAMES].to_numpy(),
@@ -218,26 +214,32 @@ def fit_regression_models(regression_df):
 
     return X, models
 
+def predict_gp(model_info, X, batch_size=256):
+    mean_chunks = []
+    uncertainty_chunks = []
 
-def predict_gp(model_info, X):
-    X_norm = normalize(X, bounds=model_info["X_bounds"])
+    for start in range(0, len(X), batch_size):
+        X_batch = X[start:start + batch_size]
+        X_norm = normalize(X_batch, bounds=model_info["X_bounds"])
 
-    with torch.no_grad():
-        posterior = model_info["model"].posterior(X_norm)
-        mean_std = posterior.mean.squeeze(-1)
-        variance_std = posterior.variance.squeeze(-1)
+        with torch.no_grad(), gpytorch.settings.fast_pred_var():
+            posterior = model_info["model"].posterior(X_norm)
+            mean_std = posterior.mean.squeeze(-1)
+            variance_std = posterior.variance.squeeze(-1)
 
-    mean = (
-        mean_std * model_info["y_std"]
-        + model_info["y_mean"]
-    )
-    uncertainty = (
-        torch.sqrt(variance_std)
-        * model_info["y_std"]
-    )
+        mean = (
+            mean_std * model_info["y_std"]
+            + model_info["y_mean"]
+        )
+        uncertainty = (
+            torch.sqrt(variance_std.clamp_min(0.0))
+            * model_info["y_std"]
+        )
 
-    return mean, uncertainty
+        mean_chunks.append(mean.detach().cpu())
+        uncertainty_chunks.append(uncertainty.detach().cpu())
 
+    return torch.cat(mean_chunks), torch.cat(uncertainty_chunks)
 
 def predict_all_regression(models, X):
     means = []
@@ -252,7 +254,6 @@ def predict_all_regression(models, X):
         torch.stack(means, dim=1),
         torch.stack(uncertainties, dim=1)
     )
-
 
 # ---------------------------------------------------------------------------
 # Gaussian-process classification
@@ -297,7 +298,6 @@ class GPClassifier(ApproximateGP):
         covar_x = self.covar_module(x)
         return MultivariateNormal(mean_x, covar_x)
 
-
 def fit_gp_classifier(X, y, num_classes):
     X_bounds = torch.stack((X.min(dim=0).values, X.max(dim=0).values))
     X_norm = normalize(X, bounds=X_bounds)
@@ -339,7 +339,6 @@ def fit_gp_classifier(X, y, num_classes):
         "num_classes": num_classes,
     }
 
-
 def fit_classification_models(training_df):
     X = torch.tensor(
         training_df[INPUT_NAMES].to_numpy(),
@@ -347,12 +346,12 @@ def fit_classification_models(training_df):
     )
 
     y_class = torch.tensor(
-        training_df["Clasificacion"].to_numpy(),
+        training_df["Class"].to_numpy(),
         dtype=torch.long
     )
 
     y_feas = torch.tensor(
-        training_df["Factibilidad"].to_numpy(),
+        training_df["Feasibility"].to_numpy(),
         dtype=torch.long
     )
 
@@ -361,54 +360,43 @@ def fit_classification_models(training_df):
 
     return X, class_model, feasibility_model
 
+def predict_classifier(model_info, X, batch_size=2000):
+    probability_chunks = []
 
-def predict_classifier(model_info, X):
-    X_norm = normalize(X, bounds=model_info["X_bounds"])
+    for start in range(0, len(X), batch_size):
+        X_batch = X[start:start + batch_size]
+        X_norm = normalize(X_batch, bounds=model_info["X_bounds"])
 
-    with torch.inference_mode():
-        latent = model_info["model"](X_norm)
-        prediction = model_info["likelihood"](latent)
-        probabilities = prediction.probs.mean(dim=0)
+        with torch.inference_mode():
+            latent = model_info["model"](X_norm)
+            prediction = model_info["likelihood"](latent)
+            probabilities = prediction.probs.mean(dim=0)
 
+        probability_chunks.append(probabilities.detach().cpu())
+
+    probabilities = torch.cat(probability_chunks, dim=0)
     predicted_class = probabilities.argmax(dim=-1)
 
     return predicted_class, probabilities
-
 
 # ---------------------------------------------------------------------------
 # Ternary mesh and plotting utilities
 # ---------------------------------------------------------------------------
 
 def ternary_mesh(step=MESH_STEP, restrict_search_domain=False):
-    """
-    Generate a simplex mesh.
+    tol = 1e-12
+    xs = torch.arange(0.0, 1.0 + tol, step, dtype=torch.float64)
+    a, b = torch.meshgrid(xs, xs, indexing="ij")
+    c = 1.0 - a - b
+    mask = c >= -tol
 
-    For visual response maps, use the full simplex.
-    For Pareto/search calculations, restrict each component to 0.10-0.80.
-    """
-    values = np.arange(0.0, 1.0 + step / 2, step)
+    X_mesh = torch.stack([a[mask], b[mask], c[mask].clamp_min(0.0)], dim=1)
 
-    points = []
-    for a in values:
-        for b in values:
-            c = 1.0 - a - b
+    if restrict_search_domain:
+        domain_mask = torch.all((X_mesh >= COMPONENT_MIN - tol) & (X_mesh <= COMPONENT_MAX + tol), dim=1)
+        X_mesh = X_mesh[domain_mask]
 
-            if c < -1e-12:
-                continue
-
-            c = max(c, 0.0)
-            point = np.array([a, b, c])
-
-            if restrict_search_domain:
-                if np.any(point < COMPONENT_MIN - 1e-12):
-                    continue
-                if np.any(point > COMPONENT_MAX + 1e-12):
-                    continue
-
-            points.append(point)
-
-    return torch.tensor(np.asarray(points), dtype=torch.float64)
-
+    return X_mesh
 
 def ternary_to_xy(X):
     if torch.is_tensor(X):
@@ -421,7 +409,6 @@ def ternary_to_xy(X):
     y = (np.sqrt(3) / 2) * c
 
     return x, y
-
 
 def draw_ternary_axes(ax, tick_step=0.2, grid_step=0.1):
     h = np.sqrt(3) / 2
@@ -487,7 +474,6 @@ def draw_ternary_axes(ax, tick_step=0.2, grid_step=0.1):
     ax.set_yticks([])
     ax.set_frame_on(False)
 
-
 def plot_ternary_map(
     X_mesh,
     z,
@@ -542,7 +528,6 @@ def plot_ternary_map(
     )
     plt.close(fig)
 
-
 # ---------------------------------------------------------------------------
 # Final response and uncertainty maps
 # ---------------------------------------------------------------------------
@@ -588,7 +573,6 @@ def final_response_maps(
         )
 
     return X_mesh, means, uncertainty
-
 
 # ---------------------------------------------------------------------------
 # Processability classification and feasibility constraint
@@ -646,7 +630,6 @@ def classification_maps(
         feasibility_probability
     )
 
-
 # ---------------------------------------------------------------------------
 # Pareto front and hypervolume
 # ---------------------------------------------------------------------------
@@ -660,7 +643,7 @@ def pareto_analysis(
     # Candidate domain used in the manuscript: each fraction 0.10-0.80.
     X_domain = ternary_mesh(
         step=MESH_STEP,
-        restrict_search_domain=True
+        restrict_search_domain=False
     )
 
     means, _ = predict_all_regression(
@@ -779,7 +762,6 @@ def pareto_analysis(
 
     return experimental_hv, predicted_hv
 
-
 # ---------------------------------------------------------------------------
 # Leave-one-out validation
 # ---------------------------------------------------------------------------
@@ -828,7 +810,7 @@ def leave_one_out(regression_df, output_dir):
     metrics = []
 
     results = regression_df[
-        ["Muestras", *INPUT_NAMES]
+        ["Sample", *INPUT_NAMES]
     ].reset_index(drop=True)
 
     for j, output_name in enumerate(OUTPUT_NAMES):
@@ -955,7 +937,6 @@ def leave_one_out(regression_df, output_dir):
 
     return metrics_df
 
-
 # ---------------------------------------------------------------------------
 # SHAP analysis
 # ---------------------------------------------------------------------------
@@ -1077,7 +1058,6 @@ def shap_analysis(
             )
             plt.close()
 
-
 # ---------------------------------------------------------------------------
 # Independent validation samples 31-33
 # ---------------------------------------------------------------------------
@@ -1110,7 +1090,7 @@ def validation_analysis(
     ].to_numpy()
 
     validation_output = validation_df[
-        ["Muestras", *INPUT_NAMES, *OUTPUT_NAMES]
+        ["Sample", *INPUT_NAMES, *OUTPUT_NAMES]
     ].copy()
 
     validation_output["Pred_C"] = predicted[:, 0]
@@ -1139,7 +1119,7 @@ def validation_analysis(
     )
 
     for i, sample in enumerate(
-        validation_df["Muestras"].to_numpy()
+        validation_df["Sample"].to_numpy()
     ):
         ax.scatter(
             predicted[i, 0],
@@ -1200,7 +1180,6 @@ def validation_analysis(
         bbox_inches="tight"
     )
     plt.close(fig)
-
 
 # ---------------------------------------------------------------------------
 # Save final mesh predictions
@@ -1297,7 +1276,6 @@ def save_final_mesh(
         output_dir / "Final_mesh_predictions.csv",
         index=False
     )
-
 
 # ---------------------------------------------------------------------------
 # Main
@@ -1440,7 +1418,6 @@ def main():
         f"Results saved to: "
         f"{output_dir.resolve()}"
     )
-
 
 if __name__ == "__main__":
     main()
