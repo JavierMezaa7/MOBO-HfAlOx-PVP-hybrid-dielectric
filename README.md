@@ -21,14 +21,14 @@ The relevant columns are:
 
 | Column | Meaning |
 |---|---|
-| `Muestras` | Sample number |
+| `Sample` | Sample number |
 | `AlOx`, `HfOx`, `PVP` | Ternary precursor fractions |
 | `C (nF/cm2)` | Areal capacitance at 1 kHz |
 | `C_std` | Experimental SD of capacitance |
 | `-log J` | Leakage-current objective |
 | `I_std` | Experimental SD of `-log J` |
-| `Clasificacion` | Processability class |
-| `Factibilidad` | Binary feasibility label |
+| `Class` | Processability class |
+| `Feasibility` | Binary feasibility label |
 
 ### Processability labels
 
