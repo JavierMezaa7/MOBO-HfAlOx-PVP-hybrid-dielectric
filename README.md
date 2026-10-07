@@ -41,7 +41,7 @@ The relevant columns are:
 - `0` = Infeasible
 - `1` = Feasible
 
-Only samples labeled `Suitable` and `Factibilidad = 1` are included in the GPR models.
+Only samples labeled `Suitable` and `Feasibility = 1` are included in the GPR models.
 
 ## Analyses reproduced
 
